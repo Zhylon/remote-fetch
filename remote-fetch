@@ -113,7 +113,7 @@ cmd_fetch() {
 cmd_copy() {
   local server="$1" remote_path="$2" out_dir="${3:-$PWD}"
   read_server "$server"
-  mapfile -t SSHA < <(ssh_args)
+  build_ssh_args
   mkdir -p "$out_dir"
   info "rsync $SRV_HOST:$remote_path -> $out_dir/"
   rsync -azP -e "ssh ${SSHA[*]}" "$SRV_HOST:$remote_path" "$out_dir/"
