@@ -14,8 +14,12 @@ echo "==> downloading remote-fetch"
 curl -fsSL "$RAW" -o "$tmp"
 chmod +x "$tmp"
 
-if [[ -w "$(dirname "$DEST")" ]]; then mv "$tmp" "$DEST"
-else echo "==> need sudo to write $DEST"; sudo mv "$tmp" "$DEST"; fi
+if [[ -w "$(dirname "$DEST")" ]]; then
+  install -m 0755 "$tmp" "$DEST"
+else
+  sudo install -m 0755 "$tmp" "$DEST"
+fi
+rm -f "$tmp"
 
 echo "ok: installed -> $DEST"
 "$DEST" --version
