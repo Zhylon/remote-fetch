@@ -140,13 +140,19 @@ EOF
 }
 
 cmd_update() {
-  local target="${BASH_SOURCE[0]}" tmp
+  local target="${BASH_SOURCE[0]}" target_dir tmp
+  target_dir="$(dirname "$target")"
   tmp="$(mktemp)"
   info "fetching latest from $REPO"
   curl -fsSL "$RAW_BASE/remote-fetch" -o "$tmp"
-  chmod +x "$tmp"
-  if [[ -w "$target" ]]; then mv "$tmp" "$target"
-  else sudo mv "$tmp" "$target"; fi
+
+  # install -m 0755 setzt Permissions atomar UND behandelt cross-fs korrekt
+  if [[ -w "$target_dir" ]]; then
+    install -m 0755 "$tmp" "$target"
+  else
+    sudo install -m 0755 "$tmp" "$target"
+  fi
+  rm -f "$tmp"
   ok "updated $target"
 }
 
@@ -171,7 +177,7 @@ case "${1:-}" in
   ""|-h|--help) usage ;;
   --version)    echo "$VERSION" ;;
   --update)     cmd_update ;;
-  config)       shift; cmd_config "$@" ;;
-  copy)         shift; [[ $# -ge 2 ]] || err "copy needs <server> <path>"; cmd_copy "$@" ;;
-  *)            [[ $# -ge 2 ]] || { usage; exit 1; }; cmd_fetch "$@" ;;
+  config)       ensure_config; shift; cmd_config "$@" ;;
+  copy)         ensure_config; shift; cmd_copy "$@" ;;
+  *)            ensure_config; [[ $# -ge 2 ]] || { usage; exit 1; }; cmd_fetch "$@" ;;
 esac
