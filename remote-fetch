@@ -3,7 +3,7 @@
 # https://github.com/zhylon/remote-fetch
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.3"
 REPO="zhylon/remote-fetch"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/remote-fetch"
@@ -53,10 +53,9 @@ read_server() {
   [[ -n "$SRV_HOST" ]] || err "server '$name' not found in $CONFIG_FILE"
 }
 
-ssh_args() {
-  local a=(-p "$SRV_PORT" -o StrictHostKeyChecking=accept-new)
-  [[ -n "$SRV_KEY" ]] && a=(-i "$SRV_KEY" "${a[@]}")
-  printf '%s\n' "${a[@]}"
+build_ssh_args() {
+  SSHA=(-p "$SRV_PORT" -o StrictHostKeyChecking=accept-new)
+  [[ -n "$SRV_KEY" ]] && SSHA=(-i "$SRV_KEY" "${SSHA[@]}")
 }
 
 # ---------- commands ----------
@@ -73,7 +72,7 @@ cmd_fetch() {
     esac
   done
   read_server "$server"
-  mapfile -t SSHA < <(ssh_args)
+  build_ssh_args
   mkdir -p "$out_dir"
 
   local base ts archive remote_tmp
