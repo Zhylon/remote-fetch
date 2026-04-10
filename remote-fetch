@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# remote-fetch — fetch files/dirs from remote servers as tar.gz
+# https://github.com/zhylon/remote-fetch
+set -euo pipefail
+
+VERSION="0.1.0"
+REPO="zhylon/remote-fetch"
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/remote-fetch"
+CONFIG_FILE="$CONFIG_DIR/servers.conf"
+
+# ---------- helpers ----------
+err()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m=>\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32mok:\033[0m %s\n' "$*"; }
+
+ensure_config() {
+  mkdir -p "$CONFIG_DIR"
+  [[ -f "$CONFIG_FILE" ]] || {
+    cat > "$CONFIG_FILE" <<'EOF'
+# remote-fetch servers
+# [name]
+# host=user@example.com
+# key=~/.ssh/id_ed25519
+# port=22
+EOF
+    info "created config: $CONFIG_FILE"
+  }
+}
+
+# Parse INI block [name] -> sets globals: SRV_HOST SRV_KEY SRV_PORT
+read_server() {
+  local name="$1" in_block=0 key val
+  SRV_HOST="" SRV_KEY="" SRV_PORT="22"
+  [[ -f "$CONFIG_FILE" ]] || err "no config: $CONFIG_FILE"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"; line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    if [[ "$line" =~ ^\[(.+)\]$ ]]; then
+      [[ "${BASH_REMATCH[1]}" == "$name" ]] && in_block=1 || in_block=0
+      continue
+    fi
+    (( in_block )) || continue
+    key="${line%%=*}"; val="${line#*=}"
+    key="${key// /}"; val="${val#"${val%%[![:space:]]*}"}"
+    val="${val/#\~/$HOME}"
+    case "$key" in
+      host) SRV_HOST="$val" ;;
+      key)  SRV_KEY="$val"  ;;
+      port) SRV_PORT="$val" ;;
+    esac
+  done < "$CONFIG_FILE"
+  [[ -n "$SRV_HOST" ]] || err "server '$name' not found in $CONFIG_FILE"
+}
+
+ssh_args() {
+  local a=(-p "$SRV_PORT" -o StrictHostKeyChecking=accept-new)
+  [[ -n "$SRV_KEY" ]] && a=(-i "$SRV_KEY" "${a[@]}")
+  printf '%s\n' "${a[@]}"
+}
+
+# ---------- commands ----------
+cmd_fetch() {
+  local server="$1" remote_path="$2"; shift 2
+  local out_dir="$PWD" keep_remote=0 keep_local=0 no_extract=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)   out_dir="$2"; shift 2 ;;
+      --keep-remote) keep_remote=1; shift ;;
+      --keep-local)  keep_local=1; shift ;;
+      --no-extract)  no_extract=1; shift ;;
+      *) err "unknown flag: $1" ;;
+    esac
+  done
+  read_server "$server"
+  mapfile -t SSHA < <(ssh_args)
+  mkdir -p "$out_dir"
+
+  local base ts archive remote_tmp
+  base="$(basename "$remote_path")"
+  ts="$(date +%Y%m%d-%H%M%S)"
+  archive="${base}-${ts}.tar.gz"
+  remote_tmp="/tmp/remote-fetch-$$-${archive}"
+
+  info "packing remote: $remote_path -> $remote_tmp"
+  ssh "${SSHA[@]}" "$SRV_HOST" \
+    "tar czf '$remote_tmp' -C \"\$(dirname '$remote_path')\" '$(basename "$remote_path")'"
+
+  info "downloading -> $out_dir/$archive"
+  rsync -e "ssh ${SSHA[*]}" --partial --info=progress2 \
+    "$SRV_HOST:$remote_tmp" "$out_dir/$archive"
+
+  if (( keep_remote )); then
+    info "keeping remote archive: $remote_tmp"
+  else
+    ssh "${SSHA[@]}" "$SRV_HOST" "rm -f '$remote_tmp'"
+    ok "removed remote archive"
+  fi
+
+  if (( ! no_extract )); then
+    info "extracting -> $out_dir"
+    tar xzf "$out_dir/$archive" -C "$out_dir"
+    ok "extracted"
+  fi
+
+  if (( keep_local )); then
+    info "keeping local archive: $out_dir/$archive"
+  elif (( ! no_extract )); then
+    rm -f "$out_dir/$archive"
+    ok "removed local archive"
+  fi
+}
+
+cmd_copy() {
+  local server="$1" remote_path="$2" out_dir="${3:-$PWD}"
+  read_server "$server"
+  mapfile -t SSHA < <(ssh_args)
+  mkdir -p "$out_dir"
+  info "rsync $SRV_HOST:$remote_path -> $out_dir/"
+  rsync -azP -e "ssh ${SSHA[*]}" "$SRV_HOST:$remote_path" "$out_dir/"
+}
+
+cmd_config() {
+  ensure_config
+  case "${1:-list}" in
+    list)   grep -E '^\[' "$CONFIG_FILE" | tr -d '[]' || echo "(no servers)" ;;
+    edit)   "${EDITOR:-vi}" "$CONFIG_FILE" ;;
+    path)   echo "$CONFIG_FILE" ;;
+    add)    [[ -n "${2:-}" ]] || err "usage: config add <name>"
+            cat >> "$CONFIG_FILE" <<EOF
+
+[$2]
+host=user@host
+key=~/.ssh/id_ed25519
+port=22
+EOF
+            ok "added [$2] — run: remote-fetch config edit" ;;
+    *) err "config: list|edit|add <name>|path" ;;
+  esac
+}
+
+cmd_update() {
+  local target="${BASH_SOURCE[0]}" tmp
+  tmp="$(mktemp)"
+  info "fetching latest from $REPO"
+  curl -fsSL "$RAW_BASE/remote-fetch" -o "$tmp"
+  chmod +x "$tmp"
+  if [[ -w "$target" ]]; then mv "$tmp" "$target"
+  else sudo mv "$tmp" "$target"; fi
+  ok "updated $target"
+}
+
+usage() {
+  cat <<EOF
+remote-fetch v$VERSION
+
+Usage:
+  remote-fetch <server> <remote-path> [-o dir] [--keep-remote] [--keep-local] [--no-extract]
+  remote-fetch copy <server> <remote-path> [out-dir]
+  remote-fetch config [list|edit|add <name>|path]
+  remote-fetch --update | --version | --help
+
+Default workflow: tar.gz on remote -> download -> extract local -> cleanup both sides.
+Config: $CONFIG_FILE
+EOF
+}
+
+# ---------- dispatch ----------
+ensure_config
+case "${1:-}" in
+  ""|-h|--help) usage ;;
+  --version)    echo "$VERSION" ;;
+  --update)     cmd_update ;;
+  config)       shift; cmd_config "$@" ;;
+  copy)         shift; [[ $# -ge 2 ]] || err "copy needs <server> <path>"; cmd_copy "$@" ;;
+  *)            [[ $# -ge 2 ]] || { usage; exit 1; }; cmd_fetch "$@" ;;
+esac
